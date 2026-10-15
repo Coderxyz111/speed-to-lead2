@@ -33,7 +33,7 @@ function openDb(file) {
       const res = db.prepare(`INSERT OR IGNORE INTO leads
         (leadgen_id, client_id, name, phone_raw, whatsapp_id, answers_json, status, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-        .run(l.leadgen_id, l.client_id, l.name, l.phone_raw, l.whatsapp_id, JSON.stringify(l.answers || {}), l.status, now(), now());
+        .run(l.leadgen_id, l.client_id, l.name ?? null, l.phone_raw ?? null, l.whatsapp_id ?? null, JSON.stringify(l.answers || {}), l.status, now(), now());
       return res.changes > 0;
     },
     update(leadgen_id, fields) {
