@@ -132,6 +132,27 @@ function createApp({ config, db, fetchImpl = fetch, log = console, now = () => n
 
   app.get('/health', (_req, res) => res.json({ ok: true }));
 
+  // Public privacy policy + data deletion page (Meta requires a URL before an app can be published).
+  app.get(['/privacy', '/data-deletion'], (_req, res) => {
+    const names = config.clients.map(c => esc(c.business_name)).join(', ') || 'our clients';
+    res.type('html').send(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Privacy Policy</title><style>body{font-family:system-ui,sans-serif;max-width:720px;margin:40px auto;padding:0 16px;line-height:1.6;color:#222;background:#fff}h1{font-size:1.6em}h2{font-size:1.15em;margin-top:1.6em}</style></head><body>
+<h1>Privacy Policy</h1>
+<p>This service handles enquiries submitted through Facebook lead forms on behalf of ${names} (Singapore).</p>
+<h2>What we collect</h2>
+<p>The details you enter in the enquiry form, such as your name, phone number and answers about your project, plus notes and a summary of any follow-up call.</p>
+<h2>How we use it</h2>
+<p>Only to respond to your enquiry: to contact you on WhatsApp (including a call from an AI assistant, with your permission), understand your project, and arrange a site visit or quotation. We do not sell your data or use it for unrelated marketing.</p>
+<h2>Who we share it with</h2>
+<p>Only the service providers needed to contact you: Meta (Facebook and WhatsApp), our voice AI provider, our hosting provider, and the business you enquired with.</p>
+<h2>How long we keep it</h2>
+<p>For as long as needed to handle your enquiry and any resulting job, then it is deleted.</p>
+<h2>Your rights and data deletion</h2>
+<p>You can ask to see, correct or delete your data at any time, or stop being contacted. Reply "STOP" on WhatsApp, or message the business you enquired with through its Facebook page, and we will delete your data within 30 days.</p>
+<p>This policy follows Singapore's Personal Data Protection Act (PDPA).</p>
+</body></html>`);
+  });
+
   // Meta's one-time subscription check
   app.get('/webhooks/facebook', (req, res) => {
     if (config.fbVerifyToken && req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === config.fbVerifyToken) {
