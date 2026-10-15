@@ -18,16 +18,27 @@ function createApp({ config, db, fetchImpl = fetch, log = console, now = () => n
   // ---------- core pipeline ----------
 
   async function handleLeadEvent(ev) {
+    log.info('Processing lead', ev.leadgen_id, 'page', ev.page_id, 'form', ev.form_id);
     const client = findClient(ev);
     if (!client) {
-      log.warn('No client configured for page/form', ev);
+      log.warn('No client configured for page/form', JSON.stringify(ev));
       await notify(null, `⚠️ Lead ${esc(ev.leadgen_id)} came in for page ${esc(ev.page_id)} / form ${esc(ev.form_id)}, but no client in clients.json matches it.`);
       return;
     }
 
-    const leadData = config.dryRun
-      ? { field_data: [{ name: 'full_name', values: ['Test Lead'] }, { name: 'phone_number', values: ['9123 4567'] }] }
-      : await fetchLead(ev.leadgen_id, { graphVersion: config.graphVersion, accessToken: client.facebook_page_access_token || config.fbPageAccessToken, fetchImpl });
+    let leadData;
+    try {
+      leadData = config.dryRun
+        ? { field_data: [{ name: 'full_name', values: ['Test Lead'] }, { name: 'phone_number', values: ['9123 4567'] }] }
+        : await fetchLead(ev.leadgen_id, { graphVersion: config.graphVersion, accessToken: client.facebook_page_access_token || config.fbPageAccessToken, fetchImpl });
+    } catch (e) {
+      log.error('Could not read lead from Facebook', ev.leadgen_id, e.message);
+      if (db.insertLead({ leadgen_id: ev.leadgen_id, client_id: client.id, status: 'fetch_failed' })) {
+        db.update(ev.leadgen_id, { error: e.message, fallback_sent: 1 });
+        await notify(client, `❗ New lead ${esc(ev.leadgen_id)} for ${esc(client.business_name)}, but the server couldn't read it from Facebook.\nReason: ${esc(e.message)}\n\nCheck the lead in Meta Business Suite and contact them manually.`);
+      }
+      return;
+    }
 
     const { name, firstName, phone, answers } = parseLeadFields(leadData);
     const whatsapp_id = normalisePhone(phone, client.country);
@@ -130,12 +141,15 @@ function createApp({ config, db, fetchImpl = fetch, log = console, now = () => n
   });
 
   app.post('/webhooks/facebook', (req, res) => {
+    const events = extractLeadEvents(req.body);
+    log.info(`Facebook webhook received: object=${req.body?.object} leads=${events.map(e => e.leadgen_id).join(',') || 'none'}`);
     if (!config.dryRun && !verifyMetaSignature(req.rawBody || '', req.get('x-hub-signature-256'), config.fbAppSecret)) {
+      log.error('Facebook webhook REJECTED: signature mismatch. Check FB_APP_SECRET is the App Secret of the app that owns this webhook.');
       return res.sendStatus(401);
     }
     res.sendStatus(200); // ack fast; Meta retries slow responses
-    for (const ev of extractLeadEvents(req.body)) {
-      handleLeadEvent(ev).catch(e => log.error('Lead handling failed', ev.leadgen_id, e));
+    for (const ev of events) {
+      handleLeadEvent(ev).catch(e => log.error('Lead handling failed', ev.leadgen_id, e.message));
     }
   });
 
