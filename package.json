@@ -1,0 +1,17 @@
+{
+  "name": "speed-to-lead",
+  "version": "1.0.0",
+  "description": "Facebook lead form -> AI WhatsApp call in seconds",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/*.test.js"
+  },
+  "license": "ISC",
+  "dependencies": {
+    "express": "^4.22.3"
+  },
+  "engines": {
+    "node": ">=22.13"
+  }
+}

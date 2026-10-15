@@ -1,0 +1,13 @@
+{
+  "name": "acme_quote_call_permission",
+  "language": "en",
+  "category": "UTILITY",
+  "components": [
+    {
+      "type": "BODY",
+      "text": "Hi, thanks for your renovation enquiry with Acme Renovation. Our assistant can give you a quick WhatsApp call now to understand your project and arrange a free site visit and quotation. Tap below to allow the call."
+    },
+    { "type": "FOOTER", "text": "Takes about 3 minutes" },
+    { "type": "call_permission_request" }
+  ]
+}

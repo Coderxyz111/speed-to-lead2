@@ -1,0 +1,159 @@
+const express = require('express');
+const { verifyMetaSignature, extractLeadEvents, fetchLead, parseLeadFields } = require('./facebook');
+const { requestWhatsAppCall, verifyElevenSignature, parsePostCall } = require('./elevenlabs');
+const { normalisePhone } = require('./phone');
+const { isWithinHours, nextOpening } = require('./hours');
+const { makeNotifier, esc, phoneLink } = require('./notify');
+
+function createApp({ config, db, fetchImpl = fetch, log = console, now = () => new Date() }) {
+  const notify = makeNotifier({ botToken: config.telegramBotToken, adminChatId: config.adminTelegramChatId, fetchImpl, log });
+  const clientById = id => config.clients.find(c => c.id === id);
+
+  function findClient(ev) {
+    return config.clients.find(c =>
+      String(c.facebook_page_id) === ev.page_id &&
+      (!c.facebook_form_ids?.length || (ev.form_id && c.facebook_form_ids.map(String).includes(ev.form_id))));
+  }
+
+  // ---------- core pipeline ----------
+
+  async function handleLeadEvent(ev) {
+    const client = findClient(ev);
+    if (!client) {
+      log.warn('No client configured for page/form', ev);
+      await notify(null, `⚠️ Lead ${esc(ev.leadgen_id)} came in for page ${esc(ev.page_id)} / form ${esc(ev.form_id)}, but no client in clients.json matches it.`);
+      return;
+    }
+
+    const leadData = config.dryRun
+      ? { field_data: [{ name: 'full_name', values: ['Test Lead'] }, { name: 'phone_number', values: ['9123 4567'] }] }
+      : await fetchLead(ev.leadgen_id, { graphVersion: config.graphVersion, accessToken: client.facebook_page_access_token || config.fbPageAccessToken, fetchImpl });
+
+    const { name, firstName, phone, answers } = parseLeadFields(leadData);
+    const whatsapp_id = normalisePhone(phone, client.country);
+    const isNew = db.insertLead({ leadgen_id: ev.leadgen_id, client_id: client.id, name, phone_raw: phone, whatsapp_id, answers, status: 'received' });
+    if (!isNew) { log.info('Duplicate webhook for lead', ev.leadgen_id); return; }
+
+    const answerLines = Object.entries(answers)
+      .filter(([k]) => !/full_name|first_name|last_name/i.test(k))
+      .map(([k, v]) => `• ${esc(k.replace(/_/g, ' '))}: ${esc(v)}`).join('\n');
+    const header = `🔔 <b>New lead for ${esc(client.business_name)}</b>\n${esc(name || 'No name')} — ${phoneLink({ whatsapp_id, phone_raw: phone })}\n${answerLines}`;
+
+    if (!whatsapp_id) {
+      db.update(ev.leadgen_id, { status: 'bad_phone', fallback_sent: 1 });
+      await notify(client, `${header}\n\n❗ Couldn't read a valid mobile number, so the AI can't WhatsApp them. Please call or email manually.`);
+      return;
+    }
+
+    const at = now();
+    if (!isWithinHours(at, client.call_hours, client.timezone)) {
+      const due = nextOpening(at, client.call_hours, client.timezone);
+      db.update(ev.leadgen_id, { status: 'queued', due_at: due.getTime() });
+      const when = due.toLocaleString('en-SG', { timeZone: client.timezone, weekday: 'short', hour: 'numeric', minute: '2-digit' });
+      await notify(client, `${header}\n\n🌙 Outside call hours. The AI will reach out at ${esc(when)}.`);
+      return;
+    }
+
+    await notify(client, `${header}\n\n📲 AI is reaching out on WhatsApp now.`);
+    await triggerCall(db.get(ev.leadgen_id), client);
+  }
+
+  async function triggerCall(row, client = clientById(row.client_id)) {
+    const lead = {
+      leadgen_id: row.leadgen_id, name: row.name, whatsapp_id: row.whatsapp_id,
+      firstName: (row.name || '').split(' ')[0], answers: JSON.parse(row.answers_json || '{}'),
+    };
+    if (config.dryRun) {
+      log.info('[DRY_RUN] would request WhatsApp call', lead.whatsapp_id);
+      db.update(row.leadgen_id, { status: 'call_requested', conversation_id: `dry_${row.leadgen_id}` });
+      return;
+    }
+    try {
+      const res = await requestWhatsAppCall({ client, lead, apiKey: config.elevenApiKey, baseUrl: config.elevenBaseUrl, fetchImpl });
+      db.update(row.leadgen_id, { status: 'call_requested', conversation_id: res.conversation_id || null });
+      log.info('Call requested', row.leadgen_id, res.conversation_id);
+    } catch (e) {
+      log.error('Call request failed', row.leadgen_id, e.message);
+      db.update(row.leadgen_id, { status: 'failed', error: e.message, fallback_sent: 1 });
+      await notify(client, `❗ AI couldn't start a WhatsApp call to ${esc(row.name || 'lead')} (${phoneLink(row)}).\nReason: ${esc(e.message)}\n\nPlease call them directly.`);
+    }
+  }
+
+  async function handlePostCall(payload) {
+    const r = parsePostCall(payload);
+    if (!['post_call_transcription', 'call_initiation_failure'].includes(r.type)) return;
+    const row = (r.lead_id && db.get(r.lead_id)) || (r.conversation_id && db.getByConversation(r.conversation_id));
+    if (!row) { log.warn('Post-call webhook for unknown lead', r.lead_id, r.conversation_id); return; }
+    const client = clientById(row.client_id);
+
+    const failed = r.type === 'call_initiation_failure' || r.status === 'failed' || (r.duration_secs !== undefined && r.duration_secs < 5);
+    db.update(row.leadgen_id, {
+      status: failed ? 'failed' : 'called',
+      conversation_id: r.conversation_id || row.conversation_id,
+      outcome_json: JSON.stringify(r),
+      fallback_sent: 1,
+    });
+
+    if (failed) {
+      await notify(client, `📵 AI couldn't connect with ${esc(row.name || 'lead')} (${phoneLink(row)}).${r.failure_reason ? `\nReason: ${esc(r.failure_reason)}` : ''}\n\nGive them a normal phone call.`);
+      return;
+    }
+    const collected = Object.entries(r.collected)
+      .filter(([, v]) => v !== null && v !== undefined && v !== '')
+      .map(([k, v]) => `• ${esc(k.replace(/_/g, ' '))}: ${esc(v)}`).join('\n');
+    const verdict = { success: '✅ Qualified / booked', failure: '❌ Not a fit', unknown: '❔ Unclear' }[r.call_successful] || '📞 Call finished';
+    await notify(client, `${verdict} — <b>${esc(row.name || 'Lead')}</b> (${phoneLink(row)})\n\n${esc(r.summary)}${collected ? `\n\n${collected}` : ''}${r.duration_secs ? `\n\n⏱ ${Math.round(r.duration_secs / 60 * 10) / 10} min call` : ''}`);
+  }
+
+  // Runs every minute: start queued calls, and flag leads the AI hasn't reached.
+  async function sweep() {
+    for (const row of db.dueQueued()) await triggerCall(row);
+    for (const row of db.staleUncalled(config.fallbackAfterMinutes * 60000)) {
+      db.update(row.leadgen_id, { fallback_sent: 1 });
+      await notify(clientById(row.client_id), `⏰ ${esc(row.name || 'Lead')} (${phoneLink(row)}) hasn't accepted the WhatsApp call after ${config.fallbackAfterMinutes} min. Worth a normal phone call now while they're still warm.`);
+    }
+  }
+
+  // ---------- HTTP ----------
+
+  const app = express();
+  app.use(express.json({ verify: (req, _res, buf) => { req.rawBody = buf.toString('utf8'); } }));
+
+  app.get('/health', (_req, res) => res.json({ ok: true }));
+
+  // Meta's one-time subscription check
+  app.get('/webhooks/facebook', (req, res) => {
+    if (config.fbVerifyToken && req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === config.fbVerifyToken) {
+      return res.status(200).send(req.query['hub.challenge']);
+    }
+    res.sendStatus(403);
+  });
+
+  app.post('/webhooks/facebook', (req, res) => {
+    if (!config.dryRun && !verifyMetaSignature(req.rawBody || '', req.get('x-hub-signature-256'), config.fbAppSecret)) {
+      return res.sendStatus(401);
+    }
+    res.sendStatus(200); // ack fast; Meta retries slow responses
+    for (const ev of extractLeadEvents(req.body)) {
+      handleLeadEvent(ev).catch(e => log.error('Lead handling failed', ev.leadgen_id, e));
+    }
+  });
+
+  app.post('/webhooks/elevenlabs', (req, res) => {
+    if (!verifyElevenSignature(req.rawBody || '', req.get('elevenlabs-signature'), config.elevenWebhookSecret)) {
+      return res.sendStatus(401);
+    }
+    res.sendStatus(200);
+    handlePostCall(req.body).catch(e => log.error('Post-call handling failed', e));
+  });
+
+  // Simple lead log for you: GET /leads?token=ADMIN_TOKEN
+  app.get('/leads', (req, res) => {
+    if (!process.env.ADMIN_TOKEN || req.query.token !== process.env.ADMIN_TOKEN) return res.sendStatus(403);
+    res.json(db.recent(Number(req.query.limit) || 50).map(r => ({ ...r, answers: JSON.parse(r.answers_json || '{}'), outcome: r.outcome_json ? JSON.parse(r.outcome_json) : null, answers_json: undefined, outcome_json: undefined })));
+  });
+
+  return { app, handleLeadEvent, triggerCall, handlePostCall, sweep };
+}
+
+module.exports = { createApp };

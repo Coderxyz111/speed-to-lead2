@@ -1,0 +1,23 @@
+{
+  "clients": [
+    {
+      "id": "acme-reno",
+      "business_name": "Acme Renovation",
+      "service_area": "all of Singapore",
+      "country": "SG",
+      "timezone": "Asia/Singapore",
+      "call_hours": { "start": "09:00", "end": "21:00", "days": [1, 2, 3, 4, 5, 6] },
+
+      "facebook_page_id": "123456789012345",
+      "facebook_form_ids": [],
+      "facebook_page_access_token": "",
+
+      "whatsapp_phone_number_id": "PASTE_FROM_ELEVENLABS_WHATSAPP_PAGE",
+      "elevenlabs_agent_id": "agent_xxxxxxxxxxxxxxxx",
+      "permission_template_name": "acme_quote_call_permission",
+      "permission_template_language": "en",
+
+      "telegram_chat_id": "-1001234567890"
+    }
+  ]
+}
