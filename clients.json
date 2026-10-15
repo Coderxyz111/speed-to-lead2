@@ -1,0 +1,23 @@
+{
+  "clients": [
+    {
+      "id": "teo-brothers",
+      "business_name": "Teo Brothers Engineering",
+      "service_area": "all of Singapore",
+      "country": "SG",
+      "timezone": "Asia/Singapore",
+      "call_hours": { "start": "09:00", "end": "21:00", "days": [1, 2, 3, 4, 5, 6] },
+
+      "facebook_page_id": "586403147886478",
+      "facebook_form_ids": [],
+      "facebook_page_access_token": "",
+
+      "whatsapp_phone_number_id": "FILL_IN_STEP_3",
+      "elevenlabs_agent_id": "FILL_IN_STEP_5",
+      "permission_template_name": "teo_brothers_call_permission",
+      "permission_template_language": "en",
+
+      "telegram_chat_id": "FILL_IN_STEP_1"
+    }
+  ]
+}
